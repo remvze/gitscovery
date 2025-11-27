@@ -1,29 +1,29 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
-
-import type { Projects } from '@/data/projects';
 
 import styles from './app.module.css';
 import { pick } from '@/helpers/random';
 import { Container } from '../container';
 import { cn } from '@/helpers/styles';
 
-interface AppProps {
-  projects: Projects;
-}
+const getRecentDate = (months: number = 6) => {
+  const date = new Date();
+  date.setMonth(date.getMonth() - months);
 
-export function App({ projects }: AppProps) {
+  return date.toISOString().split('T')[0]; // YYYY-MM-DD
+};
+
+const CACHE_KEY = 'gitscovery_repos';
+const CACHE_TIMESTAMP_KEY = 'gitscovery_timestamp';
+const CACHE_DURATION = 1000 * 60 * 30; // half hour
+
+export function App() {
   return (
     <div className={styles.app}>
-      <div className={styles.latest}>
-        <h2>Latest:</h2>
-        <a href={projects.at(-1)?.repo}>[{projects.at(-1)?.repoLabel}]</a>
-      </div>
-
       <div className={styles.pattern} />
 
       <div className={styles.wrapper}>
-        <Button projects={projects} />
+        <Button />
         <div className={cn(styles.lines, styles.one)} />
         <div className={cn(styles.lines, styles.two)} />
         <div className={cn(styles.circle, styles.one)} />
@@ -49,7 +49,7 @@ export function App({ projects }: AppProps) {
   );
 }
 
-function Button({ projects }: AppProps) {
+function Button() {
   const ref = useRef<HTMLButtonElement>(null);
   const [position, setPosition] = useState({ x: 0, y: 0 });
 
@@ -81,16 +81,95 @@ function Button({ projects }: AppProps) {
 
   const { x, y } = position;
 
-  const handleClick = () => {
-    const randomProject = pick(projects);
+  const [repos, setRepos] = useState<Array<string>>([]);
+  const [isLoading, setIsLoading] = useState(false);
 
-    window.location.href = randomProject.repo;
+  useEffect(() => {
+    const fetchRepos = async () => {
+      /**
+       * Check cache first to avoid tate limits:
+       */
+      const cached = localStorage.getItem(CACHE_KEY);
+      const timestamp = localStorage.getItem(CACHE_TIMESTAMP_KEY);
+      const isCacheValid =
+        timestamp && Date.now() - parseInt(timestamp) < CACHE_DURATION;
+
+      if (cached && isCacheValid) {
+        setRepos(JSON.parse(cached));
+        return;
+      }
+
+      setIsLoading(true);
+
+      /**
+       * Build query string:
+       */
+      const recentDate = getRecentDate(6);
+      const minStars = pick([500, 1000, 2000, 5000]);
+      const maxStars = minStars + 10_000;
+
+      const queryParts = [
+        `stars:${minStars}..${maxStars}`,
+        `pushed:>${recentDate}`, // Ensures activity
+        `archived:false`, // Filters out dead/read-only projects
+        `is:public`,
+      ];
+
+      const randomPage = Math.floor(Math.random() * 10) + 1;
+
+      const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(queryParts.join(' '))}&sort=updated&order=desc&per_page=100&page=${randomPage}`;
+
+      try {
+        const res = await fetch(url);
+
+        if (!res.ok) {
+          if ((res.status === 403 || res.status === 429) && cached) {
+            console.warn('Rate limited, using cached data.');
+
+            setRepos(JSON.parse(cached));
+
+            return;
+          }
+
+          throw new Error('GitHub API Error');
+        }
+
+        const json = await res.json();
+
+        // Filter out items that might have 0 issues (often mirrors or personal backups)
+        // logic: open_issues_count is usually a good proxy for "alive"
+        const validUrls = json.items
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .filter((item: any) => item.open_issues_count > 0)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .map((item: any) => item.html_url);
+
+        setRepos(validUrls);
+
+        // Save to cache
+        localStorage.setItem(CACHE_KEY, JSON.stringify(validUrls));
+        localStorage.setItem(CACHE_TIMESTAMP_KEY, Date.now().toString());
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchRepos();
+  }, []);
+
+  const handleClick = () => {
+    const randomRepo = pick(repos);
+
+    if (window.open) window.open(randomRepo, '_blank')?.focus();
   };
 
   return (
     <motion.button
       animate={{ x, y }}
       className={styles.button}
+      disabled={isLoading || repos.length === 0}
       ref={ref}
       style={{ position: 'relative' }}
       transition={{ damping: 15, mass: 0.1, stiffness: 150, type: 'spring' }}
@@ -129,7 +208,7 @@ function Button({ projects }: AppProps) {
           type: 'spring',
         }}
       >
-        [New Project]
+        {isLoading ? '[Loading]' : '[New Project]'}
       </motion.span>
     </motion.button>
   );
